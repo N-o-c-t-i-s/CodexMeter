@@ -10241,6 +10241,28 @@
           }
         }
       }
+    },
+    "windowstart.settings.account_unavailable" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Current Codex account details are unavailable. Reload models to reconnect."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "暂时无法读取当前 Codex 账号。点击“重新加载模型”以重新连接。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "暫時無法讀取目前的 Codex 帳號。按「重新載入模型」以重新連線。"
+          }
+        }
+      }
     }
   },
   "version": "1.1"

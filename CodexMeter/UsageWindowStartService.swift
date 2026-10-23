@@ -46,6 +46,7 @@ final class UsageWindowStartService: ObservableObject {
     /// previous account's switch and schedule.
     private var pendingAccountReload = false
     private var lastModelCatalogAttempt: Date?
+    private var modelCatalogRequestID: UUID?
     private var cancellables: Set<AnyCancellable> = []
     private var observers: [(center: NotificationCenter, token: NSObjectProtocol)] = []
     /// Consecutive read-only rechecks that have not produced a new reset.
@@ -102,10 +103,14 @@ final class UsageWindowStartService: ObservableObject {
 
     /// Both automation switches require a model and a still-supported effort.
     var canEnableAutomation: Bool {
-        guard let model = selectedModel else { return false }
+        guard canEditSettings, let model = selectedModel else { return false }
         return UsageWindowReasoningPreference.resolved(
             stored: settings.reasoningEffort, model: model
         ) != nil
+    }
+
+    var canEditSettings: Bool {
+        accountKey != nil && accountKey == usage.currentAccountKey
     }
 
     /// The model list plus the currently selected model even if it is hidden, so
@@ -219,13 +224,24 @@ final class UsageWindowStartService: ObservableObject {
 
     func refreshModelCatalog() {
         guard !isModelCatalogLoading else { return }
+        guard let currentKey = usage.currentAccountKey else {
+            usage.refreshAccount()
+            return
+        }
+        guard accountKey == currentKey else {
+            reloadAccountRecord()
+            return
+        }
         isModelCatalogLoading = true
         lastModelCatalogAttempt = clock()
         let generation = usage.accountGeneration
+        let requestID = UUID()
+        modelCatalogRequestID = requestID
 
         usage.requestModels { [weak self] result in
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, self.modelCatalogRequestID == requestID else { return }
+                self.modelCatalogRequestID = nil
                 self.isModelCatalogLoading = false
                 guard self.usage.accountGeneration == generation else { return }
 
@@ -340,6 +356,8 @@ final class UsageWindowStartService: ObservableObject {
         isChecking = false
         // Everything cached here belongs to the account that just ended.
         previousObservation = nil
+        modelCatalogRequestID = nil
+        isModelCatalogLoading = false
         models = []
         modelCatalogFailures = 0
         lastModelCatalogAttempt = nil

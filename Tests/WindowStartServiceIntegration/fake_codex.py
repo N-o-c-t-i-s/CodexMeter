@@ -7,6 +7,8 @@ import time
 
 root = Path(__file__).parent
 scenario = (root / "scenario").read_text().strip()
+account_update_sent = False
+logout_update_sent = False
 
 def emit(payload):
     print(json.dumps(payload), flush=True)
@@ -22,10 +24,30 @@ for line in sys.stdin:
     if method == "initialize":
         response["result"] = {}
     elif method == "account/read":
-        response["result"] = {"account": {"type": "chatgpt", "email": "fixture@example.invalid", "planType": "plus"}}
+        if (root / "logged-out").exists():
+            if not logout_update_sent:
+                logout_update_sent = True
+                emit({"method": "account/updated", "params": {"authMode": None, "planType": None}})
+            response["result"] = {"account": None, "requiresOpenaiAuth": True}
+        elif scenario == "account-update-feedback" and request.get("params", {}).get("refreshToken"):
+            emit({"method": "account/updated", "params": {"authMode": None, "planType": None}})
+            response["result"] = {"account": None, "requiresOpenaiAuth": True}
+        else:
+            response["result"] = {"account": {"type": "chatgpt", "email": "fixture@example.invalid", "planType": "plus"}}
+    elif method == "model/list":
+        if scenario == "account-update-feedback" and not account_update_sent:
+            account_update_sent = True
+            emit({"method": "account/updated", "params": {"authMode": "chatgpt", "planType": "plus"}})
+        response["result"] = {"data": [
+            {"id": "fixture-a", "model": "fixture-a", "displayName": "Fixture A",
+             "supportedReasoningEfforts": [{"reasoningEffort": "low"}]},
+            {"id": "fixture-b", "model": "fixture-b", "displayName": "Fixture B",
+             "supportedReasoningEfforts": [{"reasoningEffort": "medium"}]}
+        ]}
     elif method == "account/rateLimits/read":
         response["result"] = {"ordinaryUsageAllowed": True, "rateLimits": {"limitId": "codex", "primary": {
-            "usedPercent": 0, "windowDurationMins": 300, "resetsAt": int(time.time()) + 18000}}}
+            "usedPercent": 20 if scenario == "account-update-feedback" else 0,
+            "windowDurationMins": 300, "resetsAt": int(time.time()) + 18000}}}
     elif method == "account/usage/read":
         response["result"] = {"summary": {}}
     elif method == "thread/start":

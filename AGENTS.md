@@ -16,13 +16,14 @@ remaining Codex account quota without requiring the user to open Codex.
 
 - Version 1.0 (build 1) is the first accepted usable release baseline. The
   current release version is 1.7.0 (build 25).
-- The current development version is 1.7.1-dev (build 28), based on 1.7.0 and
+- The current development version is 1.7.1-dev (build 29), based on 1.7.0 and
   including native Usage Window Auto-start plus explicit upstream tag tracking.
 - This fork uses `origin` for `N-o-c-t-i-s/CodexMeter` and `upstream` for
   `raycalrui/CodexMeter`. The annotated feature tag
   `usage-window-autostart-v1.0.0` captures the complete integration as one commit
   over the 1.7.0 baseline. Preserve that immutable tag; newer snapshots need new
   tag names. Keep the UWS reference tag distinct from the CodexMeter feature tag.
+  `usage-window-autostart-v1.0.1` adds account/model recovery in build 29.
 - Keep source comments in English and reserve them for non-obvious architecture,
   protocol, state, permission, and calculation behavior. Do not narrate obvious
   Swift syntax line by line.
@@ -293,9 +294,15 @@ has changed.
   `account/rateLimits/updated` notifications. Treat
   `account/updated` as an account boundary: clear the previous account's visible
   quota and notification state, deactivate its history partition, then re-read
-  with token refresh enabled. If the existing App Server rejects or stalls that
-  refresh, restart only the child App Server once and retry through normal
-  initialization.
+  with `refreshToken: false`. The notification reports an already-applied
+  change; forcing another token refresh can emit another notification, erase
+  the current account repeatedly, and make model settings unusable. Leave token
+  renewal to Codex. If the existing App Server rejects or stalls the read,
+  restart only the child App Server once and retry through normal initialization.
+  Cancel the previous model catalog on account boundaries and bind completions
+  to a request token so stale results cannot clear the replacement's loading state.
+  Reload models must re-read identity when it is unavailable, then restore only
+  that account's persisted settings.
 
 Do not scrape ChatGPT web pages, read Codex authentication files directly, or
 copy access tokens into app storage. Authentication and token refresh belong to

@@ -264,10 +264,16 @@ final class CodexUsageService: ObservableObject {
     }
 
     func refresh() {
-        refresh(forceTokenRefresh: false, source: .refresh)
+        refresh(source: .refresh)
     }
 
-    private func refresh(forceTokenRefresh: Bool, source: QuotaSampleSource) {
+    /// A manual reconnect reads identity even when its ordinary cadence is not due.
+    func refreshAccount() {
+        refreshSchedule.lastAccountAttempt = nil
+        refresh()
+    }
+
+    private func refresh(source: QuotaSampleSource) {
         if process == nil {
             start()
             return
@@ -283,13 +289,13 @@ final class CodexUsageService: ObservableObject {
         errorMessage = nil
 
         let now = Date()
-        if forceTokenRefresh || refreshSchedule.accountDue(at: now) {
+        if refreshSchedule.accountDue(at: now) {
             // Drop unanswered account requests before retrying; ignore their late replies.
             pendingRequests = pendingRequests.filter { $0.value != .account }
             refreshSchedule.lastAccountAttempt = now
             _ = sendRequest(
                 method: "account/read",
-                params: ["refreshToken": forceTokenRefresh],
+                params: ["refreshToken": false],
                 kind: .account
             )
         } else if !pendingRequests.values.contains(.account) {
@@ -531,7 +537,7 @@ final class CodexUsageService: ObservableObject {
                 handleAccountUpdated()
             case "account/rateLimits/updated":
                 // A server-side quota change should bypass the next scheduled refresh.
-                refresh(forceTokenRefresh: false, source: .notification)
+                refresh(source: .notification)
             case "turn/completed":
                 handleTurnCompleted(message)
             default:
@@ -678,10 +684,12 @@ final class CodexUsageService: ObservableObject {
         observationHistory = UsageWindowObservationHistory()
         pendingObservation = nil
         resolveObservationWaiters(with: nil)
+        finishModelList(.failure(UsageWindowStartBridgeError.unavailable))
 
-        // App Server has already applied the auth change. Force its managed ChatGPT
-        // token refresh before asking for the new account's quota.
-        refresh(forceTokenRefresh: true, source: .notification)
+        // The server already applied this change. Forcing another token refresh
+        // can emit account/updated again and keep identity in a feedback loop.
+        // Read the current identity; Codex owns automatic credential refresh.
+        refresh(source: .notification)
     }
 
     private func parseAccount(_ result: [String: Any]) {
@@ -1248,6 +1256,7 @@ final class CodexUsageService: ObservableObject {
 
     private func finishModelList(_ result: Result<[CodexModelSummary], any Error>) {
         cancelModelListTimeout()
+        pendingRequests = pendingRequests.filter { $0.value != .models }
         guard let completion = modelListCompletion else { return }
         modelListCompletion = nil
         modelListPages = []

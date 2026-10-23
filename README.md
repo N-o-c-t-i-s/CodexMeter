@@ -11,7 +11,7 @@ visible at a glance.
 > CodexMeter is an unofficial community project. It is not affiliated with or
 > endorsed by OpenAI.
 
-The current development build is **1.7.1-dev (28)**, based on released
+The current development build is **1.7.1-dev (29)**, based on released
 **1.7.0 (25)** and including native Usage Window Auto-start. The published
 1.7.0 download does not contain this development feature.
 
@@ -203,6 +203,8 @@ with a compact automation switch directly after the quota windows and opens
 these settings in an independent window. The manual
 **Start window now** action is available in the settings status section.
 Hiding the popover section leaves the Settings category reachable.
+If account details are temporarily unavailable, **Reload models** also re-reads
+the current account and restores its saved model and automation settings.
 
 This sends a real model request and may consume quota. It starts an idle usage
 window; it does not replenish quota or redeem banked reset credits. A later
@@ -245,12 +247,17 @@ switch, Settings controls, recovery fixes, tests, and upstream-reference tooling
 The app version at this snapshot is **1.7.1-dev (28)**. This feature tag is
 separate from the UWS reference tag recorded in `Upstream/`.
 
+The follow-up tag **`usage-window-autostart-v1.0.1`** is **1.7.1-dev (29)**.
+It fixes account-update feedback that could clear the model picker and prevent
+enabling automation, and restores the current account's saved preferences after
+reconnecting. The original feature tag remains unchanged.
+
 Check out the exact source snapshot:
 
 ```sh
 git clone https://github.com/N-o-c-t-i-s/CodexMeter.git
 cd CodexMeter
-git switch --detach usage-window-autostart-v1.0.0
+git switch --detach usage-window-autostart-v1.0.1
 ```
 
 To keep the feature while bringing newer CodexMeter changes into this fork's
@@ -265,13 +272,14 @@ git merge upstream/main
 ```
 
 For a clean integration branch starting from a newer upstream revision, the
-feature was deliberately saved as one commit, so it can also be reapplied with:
+feature and its follow-up fixes can also be reapplied in order with:
 
 ```sh
 git fetch origin tag usage-window-autostart-v1.0.0
+git fetch origin tag usage-window-autostart-v1.0.1
 git fetch upstream
 git switch -c integrate/usage-window-auto-start upstream/main
-git cherry-pick usage-window-autostart-v1.0.0
+git cherry-pick usage-window-autostart-v1.0.0^..usage-window-autostart-v1.0.1
 ```
 
 A Git tag identifies source; fetching it does not install a feature into the

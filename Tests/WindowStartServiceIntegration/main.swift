@@ -11,6 +11,7 @@ final class AppSettings {
     var notificationThreshold = 20
     var historyIdentitySalt = "integration-fixture"
     var historyRetention = HistoryRetention.forever
+    var developerPreviewEnabled = false
     var settingsDestination: SettingsDestination?
     func clearSettingsError() {}
     func showSettingsError(_ message: String, destination: SettingsDestination) {}
@@ -41,12 +42,13 @@ final class PushNotificationService {
         print("PASS: \(message)")
     }
 
-    static func waitUntil(_ condition: () -> Bool, timeout: TimeInterval = 8) {
+    static func waitUntil(_ condition: () -> Bool, timeout: TimeInterval = 8,
+                          message: String = "asynchronous response arrived") {
         let deadline = Date().addingTimeInterval(timeout)
         while !condition(), Date() < deadline {
             RunLoop.main.run(until: Date().addingTimeInterval(0.02))
         }
-        check(condition(), "asynchronous response arrived")
+        check(condition(), message)
     }
 
     static func requests(_ directory: URL, method: String) -> Int {
@@ -107,5 +109,59 @@ final class PushNotificationService {
             service = nil
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         }
+
+        let directory = root.appendingPathComponent("account-update-feedback")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let executable = directory.appendingPathComponent("codex")
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: CommandLine.arguments[1]), to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try "account-update-feedback".write(to: directory.appendingPathComponent("scenario"), atomically: true, encoding: .utf8)
+        let appSettings = AppSettings()
+        let store = UsageWindowStartStore(directoryURL: directory.appendingPathComponent("state"))
+        let key = HistoryAccountIdentity.make(
+            accountType: "chatgpt", email: "fixture@example.invalid", salt: appSettings.historyIdentitySalt
+        ).key
+        try store.transaction { document in
+            var record = document.record(for: key)
+            record.settings.modelID = "fixture-a"
+            record.settings.reasoningEffort = "low"
+            record.settings.autoStartEnabled = true
+            document.accounts[key] = record
+        }
+        let usage = CodexUsageService(settings: appSettings, history: UsageHistoryModel(), executableLocator: { executable })
+        let coordinator = UsageWindowStartService(usage: usage, appSettings: appSettings, store: store)
+        waitUntil({
+            usage.latestObservation != nil && coordinator.models.count == 2
+                && coordinator.settings.modelID == "fixture-a"
+        }, message: "account and model selection recover after account/updated")
+        check(coordinator.settings.autoStartEnabled, "account notification restores persisted switch instead of resetting the UI")
+        check(coordinator.canEnableAutomation, "restored model and effort enable automation controls")
+        coordinator.setAutoStartEnabled(false)
+        coordinator.setModel("fixture-b")
+        check(coordinator.settings.modelID == "fixture-b" && coordinator.settings.reasoningEffort == "medium",
+              "model selection persists after account reconciliation")
+        coordinator.setAutoStartEnabled(true)
+        let record = try store.snapshot().record(for: key)
+        check(record.settings.autoStartEnabled && record.settings.modelID == "fixture-b",
+              "automation switch and selected model are saved to the same account")
+        check(requests(directory, method: "account/read") <= 3, "account notification does not create a refresh feedback loop")
+        let requestText = try String(contentsOf: directory.appendingPathComponent("requests.jsonl"), encoding: .utf8)
+        check(!requestText.contains("\"refreshToken\": true"), "account reconciliation never forces token refresh")
+        check(requests(directory, method: "thread/start") == 0, "catalog recovery does not dispatch an activation")
+
+        let logout = directory.appendingPathComponent("logged-out")
+        try Data().write(to: logout)
+        usage.refreshAccount()
+        waitUntil({ usage.currentAccountKey == nil && coordinator.models.isEmpty && !coordinator.settings.autoStartEnabled },
+                  message: "genuine logout clears models and disables automation")
+        check(!coordinator.canEditSettings && !coordinator.canEnableAutomation, "no model setting can be edited without an account")
+        let savedAfterLogout = try store.snapshot().record(for: key)
+        check(savedAfterLogout.settings.autoStartEnabled, "logout preserves the original account's saved switch")
+        try FileManager.default.removeItem(at: logout)
+        coordinator.refreshModelCatalog()
+        waitUntil({ coordinator.models.count == 2 && coordinator.settings.modelID == "fixture-b" && coordinator.settings.autoStartEnabled },
+                  message: "reload reconnects identity and restores the same account's preferences")
+        coordinator.teardown()
+        print("All 7 real-service fake-server scenarios passed; no remote request sent.")
     }
 }

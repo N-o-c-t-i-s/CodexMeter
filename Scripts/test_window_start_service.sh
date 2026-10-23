@@ -9,6 +9,7 @@ trap 'rm -rf "$TASK_BUILD_DIR"' EXIT
 xcrun swiftc -parse-as-library -module-cache-path "$TASK_BUILD_DIR/module-cache" \
   "$TASK_PROJECT_DIR"/CodexMeter/Core/*.swift \
   "$TASK_PROJECT_DIR/CodexMeter/CodexUsageService.swift" \
+  "$TASK_PROJECT_DIR/CodexMeter/UsageWindowStartService.swift" \
   "$TASK_PROJECT_DIR/Tests/WindowStartServiceIntegration/main.swift" \
   -lsqlite3 -o "$TASK_BUILD_DIR/integration"
 "$TASK_BUILD_DIR/integration" "$TASK_PROJECT_DIR/Tests/WindowStartServiceIntegration/fake_codex.py"

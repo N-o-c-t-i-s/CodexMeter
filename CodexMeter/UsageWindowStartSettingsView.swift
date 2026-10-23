@@ -134,7 +134,9 @@ struct UsageWindowStartSettingsView: View {
 
             if !service.canEnableAutomation {
                 Label(
-                    L10n.string("windowstart.settings.needs_model"),
+                    L10n.string(service.canEditSettings
+                        ? "windowstart.settings.needs_model"
+                        : "windowstart.settings.account_unavailable"),
                     systemImage: "exclamationmark.circle"
                 )
                 .font(.caption)
@@ -180,6 +182,7 @@ struct UsageWindowStartSettingsView: View {
                     }
                 }
                 .labelsHidden()
+                .disabled(!service.canEditSettings)
             }
 
             if !service.availableEfforts.isEmpty {
