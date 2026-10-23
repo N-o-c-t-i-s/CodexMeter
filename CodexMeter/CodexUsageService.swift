@@ -17,18 +17,33 @@ final class CodexUsageService: ObservableObject {
     @Published private(set) var isTokenUsageUnavailable = false
     @Published private(set) var tokenUsageErrorMessage: String?
     @Published private(set) var rateLimitResetCredits: CodexRateLimitResetCreditsSummary?
+    /// Raw, display-neutral readings of the latest successful rate-limit response.
+    /// The window starter decides from these; the popover keeps its own normalized view.
+    @Published private(set) var latestObservation: UsageWindowObservation?
+    /// The previous observation of the same account generation, used only to tell
+    /// a sliding hypothetical reset from a fixed running window.
+    @Published private(set) var previousObservation: UsageWindowObservation?
+    /// Increments on every account boundary so late work can be discarded.
+    @Published private(set) var accountGeneration = 0
+    @Published private(set) var accountType: String?
+    /// The local pseudonymous key of the account currently authenticated.
+    @Published private(set) var currentAccountKey: String?
 
     private enum RequestKind: Equatable {
         case initialize
         case account
         case rateLimits
         case usage
+        case models
+        case threadStart
+        case turnStart
     }
 
     private let settings: AppSettings
     private let notificationManager: NotificationManager
     let pushNotificationService: PushNotificationService
     private let history: UsageHistoryModel
+    private let executableLocator: () -> URL?
     private var process: Process?
     private var inputHandle: FileHandle?
     private var outputHandle: FileHandle?
@@ -56,15 +71,32 @@ final class CodexUsageService: ObservableObject {
     private(set) var historyAccountKey: String?
     private var hasPendingAccountBoundary = false
     private var refreshSchedule = CodexRefreshSchedule()
+    // A rate-limit response can arrive before the account metadata it belongs to.
+    private var pendingObservation: PendingObservation?
+    private var observationHistory = UsageWindowObservationHistory()
+    private var observationWaiters: [(UsageWindowObservation?) -> Void] = []
+    private var observationWaiterWatchdog: DispatchWorkItem?
+    private var modelListCompletion: ((Result<[CodexModelSummary], any Error>) -> Void)?
+    private var modelListPages: [CodexModelCatalogParser.Page] = []
+    private var modelListPageCount = 0
+    private var modelListTimeout: DispatchWorkItem?
+    private var pendingWindowCompletion: ((WindowStartTransportResult) -> Void)?
+    /// Owns the ephemeral turn's attempt identity, account generation, and JSON-RPC
+    /// request identifiers. Extracted into Core so these paths are testable.
+    private var windowTurnBridge = CodexWindowTurnBridge()
 
     init(
         settings: AppSettings,
         history: UsageHistoryModel,
         notificationManager: NotificationManager = NotificationManager(),
-        pushNotificationService: PushNotificationService? = nil
+        pushNotificationService: PushNotificationService? = nil,
+        executableLocator: @escaping () -> URL? = {
+            CodexExecutableLocator.locate(homeDirectory: FileManager.default.homeDirectoryForCurrentUser)
+        }
     ) {
         self.settings = settings
         self.history = history
+        self.executableLocator = executableLocator
         self.notificationManager = notificationManager
         self.pushNotificationService = pushNotificationService ?? PushNotificationService(settings: settings)
 
@@ -177,6 +209,11 @@ final class CodexUsageService: ObservableObject {
                 let standardError = self.drainStandardErrorBuffer()
                 self.clearAppServerResources()
                 self.didInitialize = false
+                self.perform(CodexWindowTurnFailureRouter.action(
+                    for: .processExited,
+                    bridge: &self.windowTurnBridge
+                ))
+                self.finishModelList(.failure(UsageWindowStartBridgeError.unavailable))
                 self.pendingRequests.removeAll()
                 self.rateLimitRequestSources.removeAll()
                 self.cancelRefreshTimeout()
@@ -427,6 +464,11 @@ final class CodexUsageService: ObservableObject {
         usageRequestID = nil
         didInitialize = false
         clearAppServerResources(terminate: true)
+        perform(CodexWindowTurnFailureRouter.action(
+            for: .transportReset,
+            bridge: &windowTurnBridge
+        ))
+        finishModelList(.failure(UsageWindowStartBridgeError.unavailable))
         resetStandardErrorBuffer()
         markFailure(message)
     }
@@ -490,6 +532,8 @@ final class CodexUsageService: ObservableObject {
             case "account/rateLimits/updated":
                 // A server-side quota change should bypass the next scheduled refresh.
                 refresh(forceTokenRefresh: false, source: .notification)
+            case "turn/completed":
+                handleTurnCompleted(message)
             default:
                 break
             }
@@ -526,6 +570,21 @@ final class CodexUsageService: ObservableObject {
                 tokenUsageErrorMessage = text
             } else if kind == .account {
                 errorMessage = text
+            } else if kind == .models {
+                // A catalog failure must never change the quota presentation.
+                finishModelList(.failure(UsageWindowStartBridgeError.unavailable))
+            } else if kind == .threadStart {
+                perform(CodexWindowTurnFailureRouter.action(
+                    for: .threadStart,
+                    backendMessage: error["message"] as? String,
+                    bridge: &windowTurnBridge
+                ))
+            } else if kind == .turnStart {
+                perform(CodexWindowTurnFailureRouter.action(
+                    for: .turnStart,
+                    backendMessage: error["message"] as? String,
+                    bridge: &windowTurnBridge
+                ))
             } else {
                 markFailure(text)
             }
@@ -546,6 +605,12 @@ final class CodexUsageService: ObservableObject {
                 tokenUsageErrorMessage = L10n.string("error.communication")
             case .account:
                 break
+            case .models:
+                finishModelList(.failure(UsageWindowStartBridgeError.unavailable))
+            case .threadStart:
+                perform(windowTurnBridge.fail(.rejected(.transportError)))
+            case .turnStart:
+                perform(windowTurnBridge.fail(.undetermined(.connectionLost)))
             }
             return
         }
@@ -564,6 +629,12 @@ final class CodexUsageService: ObservableObject {
             parseRateLimits(result, source: rateLimitSource)
         case .usage:
             parseTokenUsage(result)
+        case .models:
+            handleModelListResult(result)
+        case .threadStart:
+            handleThreadStartResult(result, requestID: id)
+        case .turnStart:
+            handleTurnStartResult(result, requestID: id)
         }
     }
 
@@ -596,6 +667,18 @@ final class CodexUsageService: ObservableObject {
         notificationManager.resetEvaluationState()
         pushNotificationService.resetEvaluationState()
 
+        // An account boundary invalidates every pending window-start decision,
+        // including a thread that has not advanced to a turn yet.
+        invalidateWindowTurnForAccountBoundary()
+        accountType = nil
+        currentAccountKey = nil
+        accountGeneration += 1
+        latestObservation = nil
+        previousObservation = nil
+        observationHistory = UsageWindowObservationHistory()
+        pendingObservation = nil
+        resolveObservationWaiters(with: nil)
+
         // App Server has already applied the auth change. Force its managed ChatGPT
         // token refresh before asking for the new account's quota.
         refresh(forceTokenRefresh: true, source: .notification)
@@ -616,7 +699,16 @@ final class CodexUsageService: ObservableObject {
             errorMessage = L10n.string("error.not_logged_in")
             historyAccountKey = nil
             hasPendingAccountBoundary = false
+            accountType = nil
+            currentAccountKey = nil
+            accountGeneration += 1
+            invalidateWindowTurnForAccountBoundary()
+            latestObservation = nil
+            previousObservation = nil
+            observationHistory = UsageWindowObservationHistory()
+            pendingObservation = nil
             history.deactivateAccount()
+            resolveObservationWaiters(with: nil)
             return
         }
 
@@ -627,10 +719,33 @@ final class CodexUsageService: ObservableObject {
             email: account?["email"] as? String,
             salt: settings.historyIdentitySalt
         )
-        let accountChanged = historyAccountKey != identity.key || hasPendingAccountBoundary
+        // Distinguishes the first identity of this connection from a real switch.
+        let previousAccountKey = historyAccountKey
+        let accountChanged = previousAccountKey != identity.key || hasPendingAccountBoundary
         let shouldResetAnonymousHistory = hasPendingAccountBoundary && !identity.isStable
         historyAccountKey = identity.key
         hasPendingAccountBoundary = false
+        accountType = type
+        currentAccountKey = identity.key
+
+        if accountChanged {
+            // Every generation-scoped decision and in-flight waiter belongs to
+            // the account that just ended. A rate-limit read that arrived before
+            // this metadata is kept only when there was no previous identity, so
+            // the first observation is not discarded on every launch.
+            accountGeneration += 1
+            // `account/read` can notice an identity change without an
+            // `account/updated` notification, so the same boundary cleanup runs
+            // here rather than relying on one notification order.
+            invalidateWindowTurnForAccountBoundary()
+            latestObservation = nil
+            previousObservation = nil
+            observationHistory = UsageWindowObservationHistory()
+            if previousAccountKey != nil {
+                pendingObservation = nil
+            }
+            resolveObservationWaiters(with: nil)
+        }
 
         if accountChanged {
             tokenUsage = nil
@@ -655,12 +770,24 @@ final class CodexUsageService: ObservableObject {
             }
         }
 
+        // A rate-limit response can arrive before this metadata; publish it only
+        // now that the owning account is known.
+        flushPendingObservation()
+
         // Token usage is requested only after the account identity is known so a
         // late response can never be written into another account's partition.
         requestTokenUsageIfNeeded()
     }
 
     private func parseRateLimits(_ result: [String: Any], source: QuotaSampleSource) {
+        let observedAt = Date()
+        let readings = UsageWindowObservationParser.readings(
+            fromRateLimitsResult: result,
+            observedAt: observedAt
+        )
+        let authorization = UsageWindowObservationParser.authorization(
+            fromRateLimitsResult: result
+        )
         var parsed: [CodexUsageWindow] = []
 
         // Support both current multi-bucket responses and the legacy single snapshot.
@@ -702,6 +829,11 @@ final class CodexUsageService: ObservableObject {
         errorMessage = nil
         didAttemptAccountRecovery = false
         refreshSchedule.succeeded()
+        publishObservation(
+            readings: readings,
+            authorization: authorization,
+            observedAt: updatedAt
+        )
 
         if let historyAccountKey,
            shouldRecordQuotaHistory(parsed, accountKey: historyAccountKey, at: updatedAt) {
@@ -964,6 +1096,11 @@ final class CodexUsageService: ObservableObject {
 
         didAttemptAccountRecovery = true
         cancelRefreshTimeout()
+        perform(CodexWindowTurnFailureRouter.action(
+            for: .transportReset,
+            bridge: &windowTurnBridge
+        ))
+        finishModelList(.failure(UsageWindowStartBridgeError.unavailable))
         pendingRequests.removeAll()
         rateLimitRequestSources.removeAll()
         cancelUsageTimeout()
@@ -999,12 +1136,371 @@ final class CodexUsageService: ObservableObject {
         // Preserve the last successful snapshot and explicitly mark it as stale.
         isStale = !windows.isEmpty
         errorMessage = message
+        // A failed read must never leave a window-start caller waiting forever.
+        resolveObservationWaiters(with: nil)
+    }
+
+
+    // MARK: - Usage window starter bridge
+
+    /// One successful response held until the account metadata it belongs to has
+    /// arrived, so a rate-limit result is never attributed to the wrong account.
+    private struct PendingObservation {
+        let readings: [UsageWindowReading]
+        let authorization: UsageWindowAuthorization
+        let observedAt: Date
+    }
+
+    /// Requests a read that actually reaches the App Server and resolves with the
+    /// observation it publishes.
+    ///
+    /// An in-flight refresh already produces a fresh answer, so waiters attach to
+    /// it instead of treating the skipped duplicate request as a completed one.
+    func requestFreshObservation(completion: @escaping (UsageWindowObservation?) -> Void) {
+        observationWaiters.append(completion)
+        // Startup, a stall, or a crashed App Server must never leave a caller
+        // waiting forever, so every waiter has a bounded lifetime.
+        scheduleObservationWaiterWatchdog()
+
+        if process == nil {
+            start()
+        }
+        // During initialization the response chain ends in a refresh, which
+        // resolves these waiters; the watchdog covers a server that never answers.
+        guard didInitialize else { return }
+        if isRefreshInFlight { return }
+
+        refresh()
+        if !isRefreshInFlight {
+            resolveObservationWaiters(with: nil)
+        }
+    }
+
+    private func scheduleObservationWaiterWatchdog() {
+        observationWaiterWatchdog?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.resolveObservationWaiters(with: nil)
+        }
+        observationWaiterWatchdog = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 25, execute: workItem)
+    }
+
+    private func cancelObservationWaiterWatchdog() {
+        observationWaiterWatchdog?.cancel()
+        observationWaiterWatchdog = nil
+    }
+
+    /// Reads the model catalog, following `nextCursor`. A failure here only
+    /// affects the window-start settings, never the quota presentation.
+    func requestModels(completion: @escaping (Result<[CodexModelSummary], any Error>) -> Void) {
+        finishModelList(.failure(UsageWindowStartBridgeError.unavailable))
+
+        guard process != nil, didInitialize else {
+            completion(.failure(UsageWindowStartBridgeError.unavailable))
+            return
+        }
+
+        modelListCompletion = completion
+        modelListPages = []
+        modelListPageCount = 0
+        sendModelListPage(cursor: nil)
+    }
+
+    private func sendModelListPage(cursor: String?) {
+        var params: [String: Any] = [:]
+        if let cursor { params["cursor"] = cursor }
+
+        guard sendRequest(method: "model/list", params: params, kind: .models) != nil else {
+            finishModelList(.failure(UsageWindowStartBridgeError.unavailable))
+            return
+        }
+        scheduleModelListTimeout()
+    }
+
+    private func handleModelListResult(_ result: [String: Any]) {
+        cancelModelListTimeout()
+
+        let page = CodexModelCatalogParser.page(fromResult: result)
+        modelListPages.append(page)
+        modelListPageCount += 1
+
+        if let cursor = page.nextCursor,
+           modelListPageCount < CodexModelCatalogParser.maximumPages {
+            sendModelListPage(cursor: cursor)
+            return
+        }
+        finishModelList(.success(CodexModelCatalogParser.merged(modelListPages)))
+    }
+
+    private func scheduleModelListTimeout() {
+        cancelModelListTimeout()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.finishModelList(.failure(UsageWindowStartBridgeError.timedOut))
+        }
+        modelListTimeout = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: workItem)
+    }
+
+    private func cancelModelListTimeout() {
+        modelListTimeout?.cancel()
+        modelListTimeout = nil
+    }
+
+    private func finishModelList(_ result: Result<[CodexModelSummary], any Error>) {
+        cancelModelListTimeout()
+        guard let completion = modelListCompletion else { return }
+        modelListCompletion = nil
+        modelListPages = []
+        modelListPageCount = 0
+        completion(result)
+    }
+
+    private func publishObservation(
+        readings: [UsageWindowReading],
+        authorization: UsageWindowAuthorization,
+        observedAt: Date
+    ) {
+        guard let accountKey = historyAccountKey, let accountType else {
+            pendingObservation = PendingObservation(
+                readings: readings,
+                authorization: authorization,
+                observedAt: observedAt
+            )
+            return
+        }
+
+        let observation = UsageWindowObservation(
+            observedAt: observedAt,
+            accountGeneration: accountGeneration,
+            accountKey: accountKey,
+            accountType: accountType,
+            authorization: authorization,
+            readings: readings
+        )
+
+        previousObservation = observationHistory.append(observation)
+        latestObservation = observation
+        pendingObservation = nil
+        resolveObservationWaiters(with: observation)
+    }
+
+    private func flushPendingObservation() {
+        guard let pending = pendingObservation,
+              historyAccountKey != nil,
+              accountType != nil else {
+            return
+        }
+        pendingObservation = nil
+        publishObservation(
+            readings: pending.readings,
+            authorization: pending.authorization,
+            observedAt: pending.observedAt
+        )
+    }
+
+    private func resolveObservationWaiters(with observation: UsageWindowObservation?) {
+        guard !observationWaiters.isEmpty else { return }
+        cancelObservationWaiterWatchdog()
+        let waiters = observationWaiters
+        observationWaiters.removeAll()
+        waiters.forEach { $0(observation) }
+    }
+
+    // MARK: - Ephemeral turn transport
+
+    /// Runs one minimal turn on the already authenticated App Server connection.
+    ///
+    /// Using this connection rather than a separate `codex exec` child is what
+    /// makes the send identity provable: the turn reaches the same process, the
+    /// same `CODEX_HOME`, and the same provider configuration that produced the
+    /// quota observation. No token is read, copied, or logged.
+    ///
+    /// `Core/CodexWindowTurnBridge.swift` owns every decision here; this type only
+    /// executes the returned action. It is main-thread only: start, cancel, reply
+    /// handling, and the runner's timeout all run on the main queue, so the
+    /// pending-request table and the bridge need no locking of their own.
+    func startEphemeralWindowTurn(
+        model: String,
+        reasoningEffort: String,
+        prompt: String,
+        workDirectory: URL,
+        attemptID: String,
+        completion: @escaping (WindowStartTransportResult) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(.main))
+
+        guard process != nil, didInitialize else {
+            completion(.rejected(.notAuthenticated))
+            return
+        }
+
+        // One turn at a time. Overwriting the slot would orphan the previous
+        // attempt's completion until its runner timeout fired, and a bridge that
+        // is still occupied must never be handed another request, so refuse
+        // before touching either.
+        guard pendingWindowCompletion == nil, windowTurnBridge.isIdle else {
+            completion(.rejected(.concurrentRequest))
+            return
+        }
+        pendingWindowCompletion = completion
+
+        let payload = WindowStartTurnPayload(
+            attemptID: attemptID,
+            generation: accountGeneration,
+            model: model,
+            effort: reasoningEffort,
+            prompt: prompt,
+            workDirectory: workDirectory
+        )
+        perform(windowTurnBridge.begin(payload))
+    }
+
+    func cancelEphemeralWindowTurn(attemptID: String) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        perform(windowTurnBridge.cancel(attemptID: attemptID))
+    }
+
+    /// Abandons the in-flight turn because its account generation ended.
+    private func invalidateWindowTurnForAccountBoundary() {
+        perform(windowTurnBridge.accountBoundary())
+    }
+
+    /// Executes one bridge action. Every path here runs on the main queue.
+    private func perform(_ action: CodexWindowTurnBridge.Action) {
+        switch action {
+        case let .sendThread(payload):
+            try? FileManager.default.createDirectory(
+                at: payload.workDirectory,
+                withIntermediateDirectories: true
+            )
+            let params: [String: Any] = [
+                "ephemeral": true,
+                "model": payload.model,
+                "cwd": payload.workDirectory.path,
+                // Never prompt, and never let the turn touch the user's files.
+                "approvalPolicy": "never",
+                "sandbox": "read-only"
+            ]
+            guard let requestID = sendRequest(
+                method: "thread/start",
+                params: params,
+                kind: .threadStart
+            ) else {
+                perform(windowTurnBridge.fail(.rejected(.transportError)))
+                return
+            }
+            windowTurnBridge.threadRequestRegistered(id: requestID)
+
+        case let .sendTurn(_, threadID, model, effort, prompt):
+            let params: [String: Any] = [
+                "threadId": threadID,
+                "model": model,
+                "effort": effort,
+                "input": [["type": "text", "text": prompt]]
+            ]
+            guard let requestID = sendRequest(
+                method: "turn/start",
+                params: params,
+                kind: .turnStart
+            ) else {
+                perform(windowTurnBridge.fail(.undetermined(.connectionLost)))
+                return
+            }
+            windowTurnBridge.turnRequestRegistered(id: requestID)
+
+        case let .abandon(requestIDs, threadID, turnID, result):
+            // Forgetting the identifiers is what drops a late reply before it can
+            // be attributed to the attempt that replaced this one.
+            for requestID in requestIDs {
+                pendingRequests.removeValue(forKey: requestID)
+            }
+            // A dead App Server cannot acknowledge an interrupt, and writing into
+            // a closed pipe must not be treated as part of the cleanup.
+            if let threadID, transportCanReceiveRequests {
+                var params: [String: Any] = ["threadId": threadID]
+                if let turnID {
+                    params["turnId"] = turnID
+                }
+                sendUntrackedRequest(method: "turn/interrupt", params: params)
+            }
+            finishWindowTurn(result)
+
+        case let .finish(result):
+            finishWindowTurn(result)
+
+        case .drop:
+            break
+        }
+    }
+
+    private func handleThreadStartResult(_ result: [String: Any], requestID: Int) {
+        guard let thread = result["thread"] as? [String: Any],
+              let threadID = thread["id"] as? String else {
+            perform(windowTurnBridge.fail(.rejected(.transportError)))
+            return
+        }
+        perform(windowTurnBridge.receiveThreadReply(
+            requestID: requestID,
+            generation: accountGeneration,
+            threadID: threadID,
+            modelProvider: result["modelProvider"] as? String
+        ))
+    }
+
+    private func handleTurnStartResult(_ result: [String: Any], requestID: Int) {
+        guard let turn = result["turn"] as? [String: Any],
+              let turnID = turn["id"] as? String else {
+            return
+        }
+        // The turn's outcome arrives as a `turn/completed` notification.
+        perform(windowTurnBridge.receiveTurnReply(
+            requestID: requestID,
+            generation: accountGeneration,
+            turnID: turnID
+        ))
+    }
+
+    private func handleTurnCompleted(_ message: [String: Any]) {
+        let params = message["params"] as? [String: Any] ?? [:]
+        guard let threadID = params["threadId"] as? String else { return }
+
+        let turn = params["turn"] as? [String: Any] ?? [:]
+        perform(windowTurnBridge.receiveCompletion(
+            threadID: threadID,
+            turnID: turn["id"] as? String,
+            generation: accountGeneration,
+            status: turn["status"] as? String ?? "failed",
+            errorMessage: (turn["error"] as? [String: Any])?["message"] as? String
+        ))
+    }
+
+    /// Delivers one terminal result. Every caller must have released the attempt
+    /// through the bridge first, because a result that arrives while the bridge
+    /// still owns the attempt leaves it occupied and refuses every later retry.
+    private func finishWindowTurn(_ result: WindowStartTransportResult) {
+        assert(
+            windowTurnBridge.isIdle,
+            "a turn result must be delivered after its attempt is released"
+        )
+        guard let completion = pendingWindowCompletion else { return }
+        pendingWindowCompletion = nil
+        completion(result)
+    }
+
+    private var transportCanReceiveRequests: Bool {
+        process != nil && didInitialize
+    }
+
+
+    private func sendUntrackedRequest(method: String, params: Any) {
+        // A response to an untracked id is ignored by handleMessage.
+        let id = nextRequestID
+        nextRequestID += 1
+        _ = send(["method": method, "id": id, "params": params])
     }
 
     private func locateCodexExecutable() -> URL? {
-        CodexExecutableLocator.locate(
-            homeDirectory: FileManager.default.homeDirectoryForCurrentUser
-        )
+        executableLocator()
     }
 
     private var appVersion: String {
@@ -1018,4 +1514,11 @@ final class CodexUsageService: ObservableObject {
         restartWorkItem?.cancel()
         clearAppServerResources(terminate: true)
     }
+}
+
+/// Errors the window starter sees when it asks for data the App Server could not
+/// supply in time. Localized at display time.
+enum UsageWindowStartBridgeError: Error, Equatable {
+    case unavailable
+    case timedOut
 }

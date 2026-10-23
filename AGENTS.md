@@ -16,6 +16,13 @@ remaining Codex account quota without requiring the user to open Codex.
 
 - Version 1.0 (build 1) is the first accepted usable release baseline. The
   current release version is 1.7.0 (build 25).
+- The current development version is 1.7.1-dev (build 28), based on 1.7.0 and
+  including native Usage Window Auto-start plus explicit upstream tag tracking.
+- This fork uses `origin` for `N-o-c-t-i-s/CodexMeter` and `upstream` for
+  `raycalrui/CodexMeter`. The annotated feature tag
+  `usage-window-autostart-v1.0.0` captures the complete integration as one commit
+  over the 1.7.0 baseline. Preserve that immutable tag; newer snapshots need new
+  tag names. Keep the UWS reference tag distinct from the CodexMeter feature tag.
 - Keep source comments in English and reserve them for non-obvious architecture,
   protocol, state, permission, and calculation behavior. Do not narrate obvious
   Swift syntax line by line.
@@ -117,6 +124,106 @@ has changed.
 - Developer Options can create a separately identified 30-day history fixture
   and a temporary v9.9.9 update state. These fixtures must not change live quota,
   send notifications, or survive as real release state.
+- Usage-window auto-start is split so every risk-bearing decision is testable
+  without a running App Server. `Core/UsageWindowObservation.swift` decodes raw
+  `account/rateLimits/read` fields and classifies a window as active, idle, or
+  unknown; `Core/UsageWindowStartPolicy.swift` is a pure decision function over
+  an observation, settings, persisted state, and an injected clock;
+  `Core/UsageWindowStartTransitions.swift` owns the duplicate-protection state
+  machine; `Core/UsageWindowStartStore.swift` is a versioned, atomically written
+  document guarded by an application-owned `flock` so two running copies cannot
+  both send; `Core/CodexWindowStartRunner.swift` executes exactly one request
+  behind a replaceable transport. `UsageWindowStartService.swift` only sequences
+  those pieces for the app lifetime, independent of whether the popover is open.
+- The reservation is an atomic check-and-occupy, not decide-then-write.
+  `Core/UsageWindowStartReserver.swift` loads the persisted record, re-evaluates
+  the policy, and writes the reservation inside one store transaction. Never
+  decide from in-memory state and then save it: two copies would each pass their
+  own stale check and both send. Follow-up writes go through
+  `UsageWindowStartWrites`, which compares the stored attempt identifier and
+  drops a late outcome or confirmation belonging to a superseded attempt.
+- Every attempt is identified end to end. The runner binds its completion,
+  timeout, and cancellation to a per-attempt token, and
+  `Core/CodexWindowTurnBridge.swift` owns the turn's state machine on top of
+  `Core/CodexTurnStartBookkeeper.swift`: attempt identity, account generation,
+  and JSON-RPC request identifiers. The bridge returns an action and the app
+  target only executes it, so account boundaries, cancellations, and late
+  replies stay testable in the Swift Package. Cancelling an attempt must forget
+  its request identifiers so a late `thread/start` reply cannot open a second
+  turn, and `turn/completed` must name both the attempt's thread and its turn.
+- Every failure path releases the attempt. Reporting a result must not be the
+  only thing a failure branch does: a JSON-RPC error, a process exit, and a
+  transport reset all go through `Core/CodexWindowTurnFailureRouter.swift`, which
+  calls the bridge's failure path and therefore clears the bookkeeper, the
+  payload, and the attempt's request identifiers. A branch that only delivers the
+  completion leaves the attempt occupied, so later retries are refused as
+  concurrent requests until the account changes or the app restarts. An answered
+  error is a refusal and may be retried; a lost connection after `turn/start` is
+  unknown delivery and keeps the persisted protection.
+- Cancellation names its attempt. An unconditional cancel is a bug: a timeout
+  reports through the caller's completion, and that completion may legitimately
+  start the replacement, so an unscoped interrupt would land on it. Interrupt
+  first, then report, and make `cancelPendingTurn(attemptID:)` refuse a
+  non-matching attempt.
+- A recorded account generation must be compared at every stage of the turn, not
+  just stored. `account/read` can notice an identity change without an
+  `account/updated` notification, so the same invalidation runs on both paths:
+  forget the request identifiers, interrupt the thread, and resolve the attempt
+  as a refusal when no turn was dispatched or as unknown delivery when one was.
+  The reservation decision takes the app's current generation and account type
+  from the caller; letting an observation validate its own generation makes the
+  check vacuous.
+- The App Server bridge is main-thread only: start, cancel, reply handling, and
+  the runner's timeout all run on the main queue, so its pending-turn state needs
+  no separate locking.
+- Keep a spaced raw comparison in `Core/UsageWindowObservationHistory.swift`:
+  foreground quota polling runs every ten seconds, but proving an idle sliding
+  reset needs at least twenty seconds. Never use observations across account
+  boundaries, clock rollback, long outages, or an intervening active reading.
+  Classify backend turn errors internally before localization; display only
+  the resulting locally authored status. Malformed replies and every transport
+  shutdown path must release the bridge without claiming unknown sends failed.
+- The start request runs an ephemeral `thread/start` plus one minimal `turn/start`
+  on the existing authenticated App Server connection instead of a separate
+  `codex exec` child. That is what makes the send identity provable: the turn
+  reaches the same process, `CODEX_HOME`, and provider configuration that
+  produced the quota observation, so no token is read, copied, or compared.
+  Never add a second send path that resolves its own executable, provider, or
+  credentials. `thread/start` reports `modelProvider`; refuse the turn when it
+  is present and is not `openai`, because that thread would be metered
+  elsewhere. An ephemeral thread in an empty working directory still inherits
+  `$CODEX_HOME/AGENTS.md` and the user's configured MCP servers, hooks, and
+  tools; the empty directory only excludes project files. Do not claim a
+  minimal-context request. The mitigation is the empty `cwd`, a read-only
+  sandbox, `approvalPolicy: never`, and a one-line prompt — not isolation.
+- Target only the standard `codex` bucket's 300-minute window, identified by
+  `limitId` plus duration rather than the positional `primary`/`secondary` slot.
+  Reserve buckets, a menu-bar selection, and a display name must never select
+  the target. Treat `ordinaryUsageAllowed == false` as a stop and `null` or
+  missing as unknown, never as recovery. Treat a reset that has passed, a
+  missing duration, an impossible reset, or an account-generation mismatch as
+  unknown, and never start from unknown.
+- Observe `NSWorkspace.didWakeNotification` on
+  `NSWorkspace.shared.notificationCenter`; `NSWorkspace` never posts it on the
+  application center. `Core/UsageWindowSystemNotification.swift` maps each
+  system event to its delivering center so the routing stays testable, and every
+  observer must be removed from the center that added it.
+- Cap read-only rechecks. A reset that has already passed, and a confirmation
+  whose read keeps failing, are re-read on the 60-second cadence at most
+  `UsageWindowStartSchedule.maximumStaleRetries` times before the ordinary
+  periodic refresh takes over. `UsageWindowStartDeadline.isRetry` marks those
+  bounded rechecks; never schedule a short repeating timer for them.
+  A fresh periodic idle observation taken after the confirmation deadline must
+  settle a delivered attempt as unconfirmed even with automatic start off and
+  all extra retries exhausted. Retain its duplicate protection; cached readings
+  from before the deadline must not settle it.
+- Separate "delivered" from "window confirmed". A completed turn proves only
+  that the message arrived; show a running window only after a later fresh read
+  fixes a new reset. Keep duplicate protection open until the started window has
+  been observed running and then observed to end, or the user explicitly clears
+  it from the settings window. Write the reservation before dispatching, record
+  the send immediately on completion, and never treat a timeout, cancellation,
+  or lost connection as "not sent".
 - `Core/MenuBarAppearance.swift` contains bounded, codable appearance values and
   deterministic developer preview fixtures, including custom quota/time values.
   `DeveloperOptionsView.swift` provides live appearance tuning without touching
@@ -125,8 +232,11 @@ has changed.
 - `Core/PopoverContentConfiguration.swift` stores presentation-only popover
   visibility, ordering, per-quota-window choices, and the stable quota identity
   used by the menu bar indicator. The default layout shows the standard
-  five-hour quota, standard weekly quota, Reset Opportunities, Quota History,
-  and Token Activity; the GPT-Reserve weekly bucket starts hidden.
+  five-hour quota, standard weekly quota, Reset Opportunities, Usage Window
+  Auto-start, Quota History, and Token Activity; the GPT-Reserve weekly bucket
+  starts hidden. A configuration saved before a section existed gains that
+  section once. Place Usage Window Auto-start immediately after Quota Windows
+  by default; migrate the old default once, while preserving later custom orders.
   A missing menu bar selection means automatic mode and selects the returned
   quota window with the lowest remaining percentage; an explicitly chosen
   window remains selected. Quota History separately defaults to the standard
@@ -134,8 +244,16 @@ has changed.
   `PopoverCustomizationView.swift` presents these controls and a live preview in
   the Menu Bar & Popover settings category. Hidden sections must continue
   refreshing and recording history.
+- `UsageWindowStartPanel.swift` is a popover card showing automatic
+  state, execution status, running-window time remaining, model, and active hours.
+  It reuses `MetricBar.swift` and the selected time color, with a local minute
+  timeline and no extra quota requests. Keep detailed edits and manual start in
+  `UsageWindowStartSettingsView.swift`. Both automation switches use the same
+  service binding and model/effort validation; hiding the card never disables
+  monitoring. Use a bordered, primary-color Settings button for legibility
+  over translucent backgrounds.
 - `AppSettingsView.swift` owns one resizable settings window with General,
-  Menu Bar & Popover, Notifications, History & Backup, and Developer categories. The menu bar
+  Menu Bar & Popover, Notifications, Usage Window Auto-start, History & Backup, and Developer categories. The menu bar
   Settings row opens this window directly; do not expand settings inline.
   About is the final sidebar category and embeds About/update content in the
   settings detail pane. History & Backup uses the same grouped Form as General.
@@ -389,6 +507,19 @@ Codex App Server.
 ## Roadmap / TODO
 
 ### Confirmed next features
+
+- [x] Add optional **Usage Window Auto-start**, natively integrated from the
+  Usage Window Starter mechanism. When the standard five-hour window is
+  provably idle, send one minimal model turn to try to start the next window,
+  then confirm with a later quota read instead of trusting the reply. Keep
+  automatic start off by default and scoped per account, limit it to a daily
+  range that may cross midnight, and keep a 30-minute cooldown plus
+  same-episode duplicate protection. Reuse the existing App Server connection
+  for the turn, keep the reservation on disk before dispatching, serialize
+  sends across app instances with a file lock, and preserve existing quota
+  display, history, refresh, and read-only reset-credit behavior. The popover
+  gains a configurable section with a manual entry point; model, effort, and
+  schedule live in an independent settings window.
 
 - [x] Add update checking against the project's GitHub Releases. Provide a
   manual **Check for Updates** action and daily checks. Use Sparkle's EdDSA-
@@ -676,10 +807,10 @@ its configured GitHub remote and verify that the remote commit matches local
 `HEAD`. Do not create a commit merely because files changed; this rule applies
 only after a commit has already been requested or created as part of the task.
 
-Build from the repository root with Xcode 27 beta or later:
+Build from the repository root with Xcode 27 or later:
 
 ```bash
-DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild \
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
   -project CodexMeter.xcodeproj \
   -scheme CodexMeter \
   -configuration Debug \
@@ -697,7 +828,9 @@ controls respond.
 
 ```bash
 swift test
-DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer bash Scripts/test_push_service.sh
+bash Scripts/test_window_start_service.sh
+python3 -B -m unittest discover -s Scripts/tests -p 'test_uws_upstream.py'
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer bash Scripts/test_push_service.sh
 git diff --check
 ```
 
@@ -707,3 +840,18 @@ the Xcode project.
 The push integration script compiles the actual delivery service with fake
 preferences and URLProtocol responses; it must never contact real endpoints
 or read/write the maintainer's Keychain.
+
+
+## Upstream reference updates
+
+`Upstream/UsageWindowStarter.lock.json` pins the reviewed UWS tag, peeled commit,
+complete core/license inventory, source hashes, and native adaptation revision.
+Use `Scripts/uws_upstream.py prepare --tag <tag> --output-dir <new-directory>`
+to generate an explicit comparison in an isolated external Git cache. Review
+and adapt Swift before `accept`; it requires a new revision, a review note, and
+runs the Swift tests before replacing the lock. `verify` is offline. Never
+execute fetched upstream code or fetch references at app startup. See
+`Upstream/README.md` for commands and the behavior-to-Swift mapping.
+The app Resources phase includes the project license, third-party notices, and
+the preserved UWS license directly from their source files; keep them synchronized
+when reviewing a new upstream license.

@@ -8,6 +8,7 @@ struct AppSettingsView: View {
     @ObservedObject var settings: AppSettings
     @ObservedObject var history: UsageHistoryModel
     @ObservedObject var updateChecker: UpdateChecker
+    @ObservedObject var windowStart: UsageWindowStartService
     @Environment(\.openWindow) private var openWindow
     @State private var selection: String? = "settings.category.general"
     @State private var showsClearConfirmation = false
@@ -17,6 +18,7 @@ struct AppSettingsView: View {
         ("settings.category.general", "gearshape"),
         ("settings.category.menu", "menubar.rectangle"),
         ("settings.category.notifications", "bell"),
+        ("windowstart.section_title", "clock.arrow.circlepath"),
         ("settings.category.history", "externaldrive"),
         ("developer.title", "hammer"),
         ("about.title", "info.circle")
@@ -40,6 +42,9 @@ struct AppSettingsView: View {
                 case "settings.category.notifications":
                     NotificationsSettingsView(service: service, settings: settings,
                                               push: service.pushNotificationService)
+                case "windowstart.section_title":
+                    UsageWindowStartSettingsView(service: windowStart, settings: settings,
+                                                 usage: service)
                 case "developer.title":
                     DeveloperOptionsView(settings: settings, history: history,
                                          updateChecker: updateChecker, embedded: true)

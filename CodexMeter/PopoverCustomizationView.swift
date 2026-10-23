@@ -212,6 +212,11 @@ private struct PopoverContentPreview: View {
                     title: section.localizedName,
                     symbolName: "arrow.counterclockwise.circle"
                 )]
+            case .usageWindowStart:
+                return [PreviewRow(
+                    title: section.localizedName,
+                    symbolName: "clock.arrow.circlepath"
+                )]
             case .quotaHistory:
                 return [PreviewRow(title: section.localizedName, symbolName: "chart.xyaxis.line")]
             case .tokenActivity:

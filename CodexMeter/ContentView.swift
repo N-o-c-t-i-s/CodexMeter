@@ -28,6 +28,7 @@ struct ContentView: View {
     @ObservedObject var settings: AppSettings
     @ObservedObject var history: UsageHistoryModel
     @ObservedObject var updateChecker: UpdateChecker
+    @ObservedObject var windowStart: UsageWindowStartService
     @Environment(\.openWindow) private var openWindow
     @State private var maximumPopoverHeight = PopoverLayoutMetrics.initialMaximumHeight
 
@@ -266,7 +267,7 @@ struct ContentView: View {
                 return !visibleQuotaWindows.isEmpty
             case .resetCredits:
                 return service.rateLimitResetCredits != nil
-            case .quotaHistory, .tokenActivity:
+            case .usageWindowStart, .quotaHistory, .tokenActivity:
                 return true
             }
         }
@@ -296,6 +297,13 @@ struct ContentView: View {
                     summary: summary,
                     appearance: settings.developerAppearance
                 )
+            }
+        case .usageWindowStart:
+            UsageWindowStartSection(
+                service: windowStart, usage: service, appearance: settings.developerAppearance
+            ) {
+                openWindow(id: CodexMeterWindowID.usageWindowStart)
+                NSApplication.shared.activate(ignoringOtherApps: true)
             }
         case .quotaHistory:
             Button(action: openHistoryWindow) {
@@ -590,6 +598,99 @@ private struct PopoverScreenHeightReader: NSViewRepresentable {
     }
 }
 
+/// Hiding this panel never stops monitoring.
+private struct UsageWindowStartSection: View {
+    @ObservedObject var service: UsageWindowStartService
+    @ObservedObject var usage: CodexUsageService
+    let appearance: MenuBarAppearance
+    let openSettings: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        UsageWindowStartPanel(
+            autoStartEnabled: Binding(
+                get: { service.settings.autoStartEnabled },
+                set: { service.setAutoStartEnabled($0) }
+            ),
+            status: UsageWindowStartText.executionState(
+                phase: service.phase, activity: service.activity,
+                outcome: service.lastOutcomeCode, failure: service.lastFailureCode
+            ),
+            statusSymbol: statusSymbol,
+            isFailure: executionIsFailure,
+            detail: supplementalReason,
+            runningWindowReset: runningWindowReset,
+            model: modelSummary,
+            activeHours: activeHoursSummary,
+            nextCheck: service.nextCheckDate,
+            timeTint: appearance.timeColor.swiftUIColor(for: colorScheme),
+            canEnableAutomation: service.canEnableAutomation,
+            openSettings: openSettings
+        )
+    }
+
+    private var runningWindowReset: Date? {
+        guard service.activity == .active,
+              let observation = usage.latestObservation,
+              observation.accountKey == usage.currentAccountKey,
+              observation.accountGeneration == usage.accountGeneration else { return nil }
+        return observation.shortWindow?.resetsAt
+    }
+
+    private var modelSummary: String {
+        guard let modelID = service.settings.modelID else {
+            return L10n.string("windowstart.settings.model_none")
+        }
+        let name = service.selectedModel?.displayName ?? modelID
+        guard let effort = service.settings.reasoningEffort else { return name }
+        return name + " · " + effort
+    }
+
+    private var activeHoursSummary: String {
+        let hours = service.settings.activeHours
+        guard !hours.isAllDay else { return L10n.string("windowstart.panel.all_day") }
+        let start = String(format: "%02d:%02d", hours.startMinutes / 60, hours.startMinutes % 60)
+        let end = String(format: "%02d:%02d", hours.endMinutes / 60, hours.endMinutes % 60)
+        return L10n.format(
+            hours.startMinutes > hours.endMinutes
+                ? "windowstart.panel.overnight_format" : "windowstart.panel.hours_format",
+            start, end
+        )
+    }
+
+    private var supplementalReason: String? {
+        guard service.settings.autoStartEnabled,
+              !service.isSending, !service.isChecking,
+              let reason = service.blockReason else { return nil }
+        // The running/confirmation headline already explains these normal waits.
+        switch reason {
+        case .windowActive, .sameEpisodeAlreadySent, .confirmationPending:
+            return nil
+        default:
+            return UsageWindowStartText.reason(reason)
+        }
+    }
+
+    private var statusSymbol: String {
+        if executionIsFailure { return "exclamationmark.circle" }
+        if service.isChecking || service.isSending { return "arrow.triangle.2.circlepath" }
+        switch service.activity {
+        case .active: return "play.circle.fill"
+        case .idle: return "moon.zzz"
+        case .unknown: return "questionmark.circle"
+        }
+    }
+
+    private var executionIsFailure: Bool {
+        guard !service.isChecking, !service.isSending,
+              service.phase != .awaitingConfirmation else { return false }
+        switch service.lastOutcomeCode {
+        case .failed?, .deliveryUnknown?: return true
+        default: return false
+        }
+    }
+}
+
 /// Presents banked reset availability without exposing a redemption action.
 private struct ResetCreditsSection: View {
     let summary: CodexRateLimitResetCreditsSummary
@@ -813,33 +914,5 @@ private struct UsageWindowRow: View {
         case .warning: appearance.warningColor.swiftUIColor(for: colorScheme)
         case .critical: appearance.criticalColor.swiftUIColor(for: colorScheme)
         }
-    }
-}
-
-private struct MetricBar: View {
-    let label: String
-    let value: Double?
-    let tint: Color
-    let symbol: String
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        VStack(spacing: 5) {
-            HStack {
-                Label(label, systemImage: symbol)
-                Spacer()
-                Text(value.map { "\(Int($0.rounded()))%" } ?? "—")
-                    .monospacedDigit()
-            }
-            .font(.caption)
-
-            ProgressView(value: value ?? 0, total: 100)
-                .tint(tint)
-                // AppKit reuses this native control across appearance changes
-                // and can reset its tint. Recreate it so SwiftUI reapplies tint.
-                .id(colorScheme)
-                .opacity(value == nil ? 0.25 : 1)
-        }
-        .accessibilityElement(children: .combine)
     }
 }

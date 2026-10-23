@@ -11,6 +11,10 @@ visible at a glance.
 > CodexMeter is an unofficial community project. It is not affiliated with or
 > endorsed by OpenAI.
 
+The current development build is **1.7.1-dev (28)**, based on released
+**1.7.0 (25)** and including native Usage Window Auto-start. The published
+1.7.0 download does not contain this development feature.
+
 ## Preview
 
 ### Menu Bar Popover
@@ -53,6 +57,13 @@ visible at a glance.
   redeem a reset.
 - Compares remaining quota with remaining time to indicate whether consumption
   is on pace.
+- Optionally starts the next five-hour usage window when it is idle by sending
+  one very short Codex message. Automatic start is off by default, is scoped to
+  the current account, and can be limited to a daily time range. The popover
+  displays a status card with a compact automation switch, current window,
+  remaining-time progress using the same metric bar and time color as other quota windows,
+  plus the model and active hours. Detailed configuration and the manual
+  **Start window now** action live in Settings.
 - Refreshes quota on launch, every 10 seconds while the menu is open, every
   60 seconds in the background, after a Codex rate-limit update, and on manual
   request. Account checks and Token Activity polling stay at
@@ -74,10 +85,12 @@ visible at a glance.
 - Offers ring, horizontal-bar, stacked-bar, percentage-only, and progress-only
   menu bar styles.
 - Lets users independently show, hide, and reorder quota details, reset
-  opportunities, Quota History, and Token Activity in the popover. Each returned
+  opportunities, Usage Window Auto-start, Quota History, and Token Activity in
+  the popover. Each returned
   quota window has its own visibility switch, and the menu bar indicator can use
   a chosen window or the automatic lowest-remaining fallback. The default
-  popover shows Reset Opportunities, Quota History, and Token Activity while
+  popover shows Usage Window Auto-start after the quota windows, followed by
+  Reset Opportunities, Quota History, and Token Activity while
   keeping the GPT-Reserve weekly quota hidden.
 - Includes developer options with presets, custom quota/time sliders, live
   preview, safe appearance controls,
@@ -142,6 +155,11 @@ It then communicates with App Server using newline-delimited JSON-RPC messages:
    Server child process once.
 9. Calculate remaining quota, remaining time, consumption pace, and eligible
    history estimates locally.
+10. Optionally start the next usage window by creating an ephemeral thread and
+    running one minimal turn on the same authenticated App Server connection.
+    The app waits for that turn's completion event, records a reservation before
+    dispatching, and only reports a started window after a later quota read
+    confirms one.
 
 CodexMeter does not scrape ChatGPT pages, read Codex authentication files, or
 store access tokens. Authentication and token refresh remain owned by Codex.
@@ -153,7 +171,7 @@ updates. See the official [Codex App Server documentation](https://learn.chatgpt
 ## Requirements
 
 - macOS 13 or later.
-- Xcode 27 beta or later when building the current project from source.
+- Xcode 27 or later when building the current project from source.
 - A locally installed Codex CLI.
 - A working Codex login.
 
@@ -176,10 +194,26 @@ CodexMeter currently discovers `codex` in these locations:
 
 ## Build and Run
 
+### Usage Window Auto-start
+
+Open **Settings → Usage window auto-start** (设置 → 用量窗口自动启动),
+select an available model and reasoning effort, then enable automatic start if
+desired. Automatic start is off by default. The popover displays a status panel
+with a compact automation switch directly after the quota windows and opens
+these settings in an independent window. The manual
+**Start window now** action is available in the settings status section.
+Hiding the popover section leaves the Settings category reachable.
+
+This sends a real model request and may consume quota. It starts an idle usage
+window; it does not replenish quota or redeem banked reset credits. A later
+quota observation must confirm the window before the app reports success.
+
+### Build from source
+
 Clone the repository:
 
 ```bash
-git clone git@github.com:raycalrui/CodexMeter.git
+git clone https://github.com/N-o-c-t-i-s/CodexMeter.git
 cd CodexMeter
 open CodexMeter.xcodeproj
 ```
@@ -192,6 +226,59 @@ In Xcode:
 
 CodexMeter is a menu-bar-only app, so it does not appear in the Dock. Look for
 the quota indicator in the macOS menu bar after launch.
+
+### Tracking the upstream implementation
+
+The native Swift implementation records its reference UWS tag, exact commit,
+and source hashes in [Upstream/UsageWindowStarter.lock.json](Upstream/UsageWindowStarter.lock.json).
+Maintainers can explicitly prepare a newer tag, inspect its diff, adapt the
+Swift implementation, and accept the new pin after verification. See
+[Upstream/README.md](Upstream/README.md) for commands. This is a developer
+maintenance workflow; application updates still ship as compiled releases.
+
+### Feature snapshot and future CodexMeter upgrades
+
+This fork is maintained at [N-o-c-t-i-s/CodexMeter](https://github.com/N-o-c-t-i-s/CodexMeter).
+The annotated tag **`usage-window-autostart-v1.0.0`** records the complete native
+feature on CodexMeter 1.7.0, including the inline progress panel, automation
+switch, Settings controls, recovery fixes, tests, and upstream-reference tooling.
+The app version at this snapshot is **1.7.1-dev (28)**. This feature tag is
+separate from the UWS reference tag recorded in `Upstream/`.
+
+Check out the exact source snapshot:
+
+```sh
+git clone https://github.com/N-o-c-t-i-s/CodexMeter.git
+cd CodexMeter
+git switch --detach usage-window-autostart-v1.0.0
+```
+
+To keep the feature while bringing newer CodexMeter changes into this fork's
+`main`, add the original project as `upstream` once, then merge and verify:
+
+```sh
+git switch main
+git remote add upstream https://github.com/raycalrui/CodexMeter.git
+git fetch upstream --tags
+git merge upstream/main
+# Resolve any conflicts, then follow the Verification section below.
+```
+
+For a clean integration branch starting from a newer upstream revision, the
+feature was deliberately saved as one commit, so it can also be reapplied with:
+
+```sh
+git fetch origin tag usage-window-autostart-v1.0.0
+git fetch upstream
+git switch -c integrate/usage-window-auto-start upstream/main
+git cherry-pick usage-window-autostart-v1.0.0
+```
+
+A Git tag identifies source; fetching it does not install a feature into the
+running app or guarantee conflict-free upgrades. The Sparkle feed still follows
+the original project's releases, which may not include this fork's feature.
+Build and use the updated fork after merging upstream changes. This source tag
+does not publish a DMG or a Sparkle update.
 
 ## Download and Install
 
@@ -303,6 +390,12 @@ verification checklist, and planned developer customization options.
 - Usage history is stored only in
   `~/Library/Application Support/CodexMeter/UsageHistory.sqlite` and can be
   exported or cleared by the user.
+- Usage-window auto-start keeps only duplicate-protection records in
+  `~/Library/Application Support/CodexMeter/WindowStarter/state.json`: the
+  per-account switch and schedule, an attempt identifier, the targeted quota
+  window, reservation/send/confirmation timestamps, and a bounded result code.
+  It never stores prompts, model output, stderr, tokens, email addresses, or raw
+  protocol traffic, and clearing chart history does not clear it.
 
 App Sandbox is currently disabled because CodexMeter must launch the user's
 local Codex executable. This should be reviewed deliberately before any future
@@ -311,7 +404,8 @@ Mac App Store distribution.
 ## Settings
 
 The menu-bar **Settings** entry opens one resizable window with General,
-Menu Bar & Popover, Notifications, History & Backup, and Developer, followed by About.
+Menu Bar & Popover, Notifications, Usage Window Auto-start, History & Backup,
+and Developer, followed by About.
 Existing preferences are preserved. About/update information opens in the same
 settings window; Usage History remains a separate window.
 
@@ -381,6 +475,30 @@ Backups larger than 512 MiB are currently unsupported.
   accounts. CodexMeter therefore cannot restore separate historical profiles
   when switching back and forth between multiple credentials of those types;
   their anonymous history partition is reset on an explicit account change.
+- Usage-window auto-start sends a real minimal model request. It consumes a
+  small amount of quota, it does not add quota, and it does not end a window
+  that is already running.
+- Only the standard `codex` bucket's 300-minute window is targeted. A missing
+  standard bucket, a conflicting duplicate window, unknown backend fields, an
+  API-key or Bedrock account, and any ambiguity in the idle heuristic all pause
+  the feature instead of guessing.
+- The idle heuristic uses an empirical 45-second tolerance and a bounded
+  sliding-reset comparison. It is not a backend guarantee; Codex started
+  reporting a hypothetical window for an idle account and may change that
+  behavior.
+- A send whose outcome cannot be observed keeps its duplicate protection. It is
+  cleared from the settings window, which does not resend.
+- Only one usage-window auto-starter should be enabled on a Mac. Another
+  launcher that also starts Codex windows is not coordinated with. Running two
+  CodexMeter copies is serialized by a file lock: only one can hold the
+  duplicate-protection document, so the second reports "another copy is
+  handling it" instead of sending.
+- The start turn runs in an app-owned empty directory, but Codex still applies
+  the user's `$CODEX_HOME/AGENTS.md` and any configured MCP servers, hooks, and
+  tools. The empty directory only excludes project files, so this is not a
+  minimal-context request. The prompt is one line, the sandbox is read-only, and
+  approvals are disabled, so the turn cannot modify files or prompt for
+  permission.
 - The downloadable DMG is ad-hoc signed, not notarized, and not prepared for
   the Mac App Store, so first launch may require Control-clicking the app and
   choosing **Open**.
@@ -402,6 +520,15 @@ perform a UI smoke test.
 ## License
 
 CodexMeter is available under the [MIT License](LICENSE).
+
+## Acknowledgements
+
+The usage-window start heuristics — the hypothetical-window tolerance, the
+sliding-reset idle check, and the post-send confirmation delay — are derived
+from [Usage Window Starter](https://github.com/foksa/usage-window-starter) by
+Djordje Radakovic, which is MIT licensed. The implementation here is native
+Swift written against Codex App Server; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Disclaimer
 

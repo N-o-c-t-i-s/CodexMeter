@@ -2,6 +2,7 @@ import Foundation
 
 enum PopoverContentSection: String, CaseIterable, Codable, Identifiable, Sendable {
     case quotaWindows
+    case usageWindowStart
     case resetCredits
     case quotaHistory
     case tokenActivity
@@ -16,6 +17,7 @@ struct PopoverContentConfiguration: Codable, Equatable, Sendable {
     var hiddenSections: Set<PopoverContentSection>
     var hiddenQuotaWindowIDs: Set<String>
     var menuBarQuotaWindowID: String?
+    private var windowStartPlacementVersion = 1
 
     static let defaultValue = PopoverContentConfiguration(
         sectionOrder: PopoverContentSection.allCases,
@@ -95,7 +97,13 @@ struct PopoverContentConfiguration: Codable, Equatable, Sendable {
     private mutating func normalize() {
         var seen: Set<PopoverContentSection> = []
         sectionOrder = sectionOrder.filter { seen.insert($0).inserted }
-        sectionOrder.append(contentsOf: PopoverContentSection.allCases.filter { !seen.contains($0) })
+        for section in PopoverContentSection.allCases where !seen.contains(section) {
+            if section == .usageWindowStart, let quotaIndex = sectionOrder.firstIndex(of: .quotaWindows) {
+                sectionOrder.insert(section, at: quotaIndex + 1)
+            } else {
+                sectionOrder.append(section)
+            }
+        }
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -103,6 +111,7 @@ struct PopoverContentConfiguration: Codable, Equatable, Sendable {
         case hiddenSections
         case hiddenQuotaWindowIDs
         case menuBarQuotaWindowID
+        case windowStartPlacementVersion
     }
 
     init(from decoder: Decoder) throws {
@@ -112,6 +121,13 @@ struct PopoverContentConfiguration: Codable, Equatable, Sendable {
             [PopoverContentSection].self,
             forKey: .sectionOrder
         ) ?? defaults.sectionOrder
+        let placementVersion = try container.decodeIfPresent(Int.self, forKey: .windowStartPlacementVersion) ?? 0
+        // Migrate the original default once; explicit orders saved after this
+        // version remain customizable, even if they match the previous default.
+        if placementVersion == 0,
+           sectionOrder == [.quotaWindows, .resetCredits, .usageWindowStart, .quotaHistory, .tokenActivity] {
+            sectionOrder = defaults.sectionOrder
+        }
         hiddenSections = try container.decodeIfPresent(
             Set<PopoverContentSection>.self,
             forKey: .hiddenSections

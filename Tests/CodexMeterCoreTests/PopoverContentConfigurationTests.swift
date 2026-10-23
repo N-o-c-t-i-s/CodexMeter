@@ -20,11 +20,12 @@ final class PopoverContentConfigurationTests: XCTestCase {
 
         XCTAssertTrue(configuration.isSectionVisible(.quotaWindows))
         XCTAssertTrue(configuration.isSectionVisible(.resetCredits))
+        XCTAssertTrue(configuration.isSectionVisible(.usageWindowStart))
         XCTAssertTrue(configuration.isSectionVisible(.quotaHistory))
         XCTAssertTrue(configuration.isSectionVisible(.tokenActivity))
         XCTAssertEqual(
             configuration.sectionOrder,
-            [.quotaWindows, .resetCredits, .quotaHistory, .tokenActivity]
+            [.quotaWindows, .usageWindowStart, .resetCredits, .quotaHistory, .tokenActivity]
         )
         XCTAssertTrue(configuration.isQuotaWindowVisible(fiveHour))
         XCTAssertTrue(configuration.isQuotaWindowVisible(weekly))
@@ -118,10 +119,37 @@ final class PopoverContentConfigurationTests: XCTestCase {
 
         XCTAssertEqual(
             configuration.sectionOrder,
-            [.quotaWindows, .resetCredits, .tokenActivity, .quotaHistory]
+            [.quotaWindows, .usageWindowStart, .resetCredits, .tokenActivity, .quotaHistory]
         )
         XCTAssertTrue(configuration.isSectionVisible(.resetCredits))
         XCTAssertTrue(configuration.isSectionVisible(.tokenActivity))
+    }
+
+    func testDecodingAnOlderOrderAddsTheWindowStartSectionExactlyOnce() throws {
+        // A configuration saved before the window-start section existed, with a
+        // custom order and one hidden section.
+        let stored = """
+        {
+          "sectionOrder" : ["tokenActivity", "quotaWindows"],
+          "hiddenSections" : ["quotaHistory"],
+          "hiddenQuotaWindowIDs" : [],
+          "menuBarQuotaWindowID" : null
+        }
+        """
+
+        let configuration = try JSONDecoder().decode(
+            PopoverContentConfiguration.self,
+            from: Data(stored.utf8)
+        )
+
+        XCTAssertEqual(configuration.sectionOrder.filter { $0 == .usageWindowStart }.count, 1)
+        XCTAssertEqual(configuration.sectionOrder.prefix(2), [.tokenActivity, .quotaWindows])
+        XCTAssertTrue(configuration.isSectionVisible(.usageWindowStart))
+        XCTAssertFalse(configuration.isSectionVisible(.quotaHistory))
+        XCTAssertEqual(
+            configuration.sectionOrder.sorted { $0.rawValue < $1.rawValue },
+            PopoverContentSection.allCases.sorted { $0.rawValue < $1.rawValue }
+        )
     }
 
     func testDecodingOlderEmptyPreferencesUsesCurrentDefaults() throws {
@@ -131,6 +159,28 @@ final class PopoverContentConfigurationTests: XCTestCase {
         )
 
         XCTAssertEqual(configuration, .defaultValue)
+    }
+
+    func testPreIntegrationPreferencesInsertPanelImmediatelyAfterQuota() throws {
+        let stored = Data(#"{"sectionOrder":["quotaWindows","resetCredits","quotaHistory","tokenActivity"]}"#.utf8)
+        let configuration = try JSONDecoder().decode(PopoverContentConfiguration.self, from: stored)
+        XCTAssertEqual(configuration.sectionOrder, [.quotaWindows, .usageWindowStart, .resetCredits, .quotaHistory, .tokenActivity])
+    }
+
+    func testLegacyDefaultPanelPositionMigratesWithoutChangingVisibility() throws {
+        let stored = Data(#"{"sectionOrder":["quotaWindows","resetCredits","usageWindowStart","quotaHistory","tokenActivity"],"hiddenSections":["usageWindowStart"]}"#.utf8)
+        let configuration = try JSONDecoder().decode(PopoverContentConfiguration.self, from: stored)
+        XCTAssertEqual(configuration.sectionOrder, PopoverContentConfiguration.defaultValue.sectionOrder)
+        XCTAssertFalse(configuration.isSectionVisible(.usageWindowStart))
+    }
+
+    func testNewExplicitOrderSurvivesRoundTripEvenAtOriginalPosition() throws {
+        var configuration = PopoverContentConfiguration.defaultValue
+        configuration.moveSection(.usageWindowStart, by: 1)
+        let data = try JSONEncoder().encode(configuration)
+        let decoded = try JSONDecoder().decode(PopoverContentConfiguration.self, from: data)
+        XCTAssertEqual(decoded, configuration)
+        XCTAssertEqual(decoded.sectionOrder, [.quotaWindows, .resetCredits, .usageWindowStart, .quotaHistory, .tokenActivity])
     }
 
     private func makeWindow(

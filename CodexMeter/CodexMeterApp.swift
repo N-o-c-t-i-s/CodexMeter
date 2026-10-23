@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 enum CodexMeterWindowID {
+    static let usageWindowStart = "usage-window-start"
     static let history = "usage-history"
     static let about = "about"
     static let settings = "app-settings"
@@ -13,6 +14,7 @@ struct CodexMeterApp: App {
     @StateObject private var history: UsageHistoryModel
     @StateObject private var usageService: CodexUsageService
     @StateObject private var updateChecker: UpdateChecker
+    @StateObject private var windowStart: UsageWindowStartService
 
     init() {
         // Complete crash recovery before settings derives any account identity.
@@ -29,8 +31,15 @@ struct CodexMeterApp: App {
         )
         _settings = StateObject(wrappedValue: settings)
         _history = StateObject(wrappedValue: history)
-        _usageService = StateObject(
-            wrappedValue: CodexUsageService(settings: settings, history: history)
+        let usageService = CodexUsageService(settings: settings, history: history)
+        _usageService = StateObject(wrappedValue: usageService)
+        // One coordinator for the app lifetime: closing the popover must not stop
+        // monitoring, and the automatic switch is scoped to the active account.
+        _windowStart = StateObject(
+            wrappedValue: UsageWindowStartService(
+                usage: usageService,
+                appSettings: settings
+            )
         )
         _updateChecker = StateObject(wrappedValue: updateChecker)
     }
@@ -41,7 +50,8 @@ struct CodexMeterApp: App {
                 service: usageService,
                 settings: settings,
                 history: history,
-                updateChecker: updateChecker
+                updateChecker: updateChecker,
+                windowStart: windowStart
             )
             .appAppearance(settings.appearanceMode)
         } label: {
@@ -62,10 +72,25 @@ struct CodexMeterApp: App {
 
         Window("CodexMeter", id: CodexMeterWindowID.settings) {
             AppSettingsView(service: usageService, settings: settings,
-                            history: history, updateChecker: updateChecker)
+                            history: history, updateChecker: updateChecker,
+                            windowStart: windowStart)
                 .appAppearance(settings.appearanceMode)
         }
         .defaultSize(width: 840, height: 700)
+        .windowResizability(.contentMinSize)
+
+        Window(
+            "CodexMeter",
+            id: CodexMeterWindowID.usageWindowStart
+        ) {
+            UsageWindowStartSettingsView(
+                service: windowStart,
+                settings: settings,
+                usage: usageService
+            )
+            .appAppearance(settings.appearanceMode)
+        }
+        .defaultSize(width: 480, height: 640)
         .windowResizability(.contentMinSize)
 
         Window("CodexMeter", id: CodexMeterWindowID.history) {

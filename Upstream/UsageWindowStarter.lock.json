@@ -1,0 +1,44 @@
+{
+  "adaptationRevision": "native-app-server-v2",
+  "commit": "b346bb0b2d3bff478ae01ce8d01145455f5c917d",
+  "files": {
+    "LICENSE": "2051c54a8115d9ede07ebb6a78aecbfe6b88b95cf9154bdc53056f7b07b44314",
+    "src/go/core/claude.go": "977b23813fd77096014e3266fd6a9adfe9da97a878ffaf986bfe03993f388793",
+    "src/go/core/codex.go": "03ec672b2447708a95c9e494ea071121cd5e0663263d12047893e39e2ea7742c",
+    "src/go/core/config.go": "069940841e2eb8d8498759b34016a09207b21f4fd365337dfc90d1e14b94c961",
+    "src/go/core/exec.go": "6450a30b21b81be33a04cba328612b6b540a1c7f86cf546c322e9d7337607c24",
+    "src/go/core/format.go": "3bedaa44f3507237656a4a3f6a2fd72feda1423db56d2594b0419a9c1ee317e5",
+    "src/go/core/instance.go": "4cb31496a55ef00ef3ee7a375c198378affef902baeab0343c836dfaaaab21d2",
+    "src/go/core/instance_test.go": "42fd1c63fecefdd5a522b66d8fe4d7daa48cf9b82abce5f53f3551edd522f2ea",
+    "src/go/core/lifecycle_test.go": "a48a9ad2b0e688a68c3fb1258ba6905690ecc80b099b0f434e1a3f3206e75a42",
+    "src/go/core/limits_test.go": "770e056f3bcad24821256ce64b1d01a418b29d4f5eafae3cad45fd91d00e56bc",
+    "src/go/core/loginitem.go": "672f0a9928581aef5e50c7273ee53cb732a15fd75f5ec9fdc1016abea9c25b0a",
+    "src/go/core/notify.go": "47470840773610ca7e2a8a6bb27297b66da043cfdb2c155643c9a6cbf9f38042",
+    "src/go/core/paths.go": "36e6fdf3e542f14f6b5d45e23a90fe3b1ff45be393fb209563d62387bdb8b35c",
+    "src/go/core/scheduler.go": "ac267cf6084a1a5b02501556a6ffd5c302eb1a3897837c10908f9da0ae61b2bd",
+    "src/go/core/scheduler_test.go": "9fdabe39e7adec3f20ee3b7a8f56d6405124814f9e43e7f6fee30a1cf83a441e",
+    "src/go/core/state.go": "197a6aff8306680611a687c02367c0fdeaa2f30768e2f5ecedcdf3f0f63c4fb0",
+    "src/go/core/store.go": "84c0905937d681d70250dafda8fd97f62a9fe33ca62f43ead8e033634057f86d",
+    "src/go/core/store_test.go": "4995160f3d325366a95f81869ecffe4bbe153e78b224742b8e68a9955d10779d",
+    "src/go/core/testdata/claude-usage-active.txt": "ca07840f78628628e8d1da5a42d65f2da46c3c727985c8fd8e4312d45466604f",
+    "src/go/core/testdata/claude-usage-idle.txt": "8bd3ecfdb814f7a045caf2f6de877c2439f231877472b009165b6430036ab5d4",
+    "src/go/core/testdata/codex-ratelimits.json": "879b2806013bdf374c5f1985ffc92c48d20b7ffcddc7d982b29d8102bca193bb",
+    "src/go/core/types.go": "103a188831e16dc43e621230bbe247e1ad3b441131de27c9aac45317ec674272"
+  },
+  "referenceRoots": [
+    "LICENSE",
+    "src/go/core/"
+  ],
+  "repository": "https://github.com/foksa/usage-window-starter",
+  "reviewDate": "2026-10-22T17:47:03.922784+00:00",
+  "reviewNote": "Reviewed UWS v0.4.0 reference and native port onto CodexMeter 1.7.0; verified spaced foreground observations, account boundaries, duplicate protection and real dispatcher failure recovery.",
+  "reviewReportSHA256": "9c1d13f6125521e3dc9bf3845874143628234822a6cb192e39dcca797a408d12",
+  "schemaVersion": 1,
+  "tag": "v0.4.0",
+  "verification": {
+    "command": "swift test",
+    "completedAt": "2026-10-22T17:47:02.966674+00:00",
+    "exitCode": 0,
+    "outputSHA256": "33f11ce58b043dcb1b2d09a7e1158052b89a5c16eaca9bc9ec4694a9ceb45610"
+  }
+}
